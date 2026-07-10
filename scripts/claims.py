@@ -12,7 +12,7 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 TEST_PASS = "test_pass"
 COMMIT = "commit"
@@ -26,6 +26,10 @@ class Claim:
     type: str
     text: str          # frase donde se detectó
     path: str = ""     # solo para file_*
+    # Para test_pass: nombres concretos citados en la afirmación (p. ej.
+    # "test_multiplica", "multiplica"). Si está vacío, la afirmación es
+    # genérica ("los tests pasan") y basta con que hubiera un test exitoso.
+    names: list[str] = field(default_factory=list)
 
 
 # Si la frase contiene negación o futuro/pendiente, no es una afirmación de hecho.
@@ -67,6 +71,21 @@ _MODIFY_VERBS = re.compile(
 # Rutas de archivo: token con extensión, con o sin backticks.
 _PATH = re.compile(r"[`\"']?([\w~][\w./~-]*\.[A-Za-z0-9]{1,8})[`\"']?")
 
+# --- Nombres concretos citados en una afirmación de tests ---
+# Identificadores de test estilo pytest (los que aparecen verbatim en la
+# salida de `pytest -v`): test_xxx, xxxTest, TestXxx.
+_TEST_NAME = re.compile(r"\b(test_\w+|\w+_test|Test[A-Z]\w+|\w*Test)\b")
+# Referencia explícita a un símbolo: "función multiplica", "method foo".
+_FUNC_KEYWORD = re.compile(
+    r"\b(?:funci[oó]n|function|m[eé]todo|method|clase|class)\s+`?([A-Za-z_]\w+)",
+    re.IGNORECASE)
+# Llamada a función con paréntesis pegado, p. ej. "multiplica(a, b)".
+# El paréntesis debe ir SIN espacio detrás del identificador para no capturar
+# prosa como "los tests pasan (12 passed)".
+_FUNC_CALL = re.compile(r"\b([A-Za-z_]\w+)\(")
+# Palabras que NO son nombres de símbolo aunque casen con los patrones.
+_NAME_STOPWORDS = {"test", "tests", "suite", "suites"}
+
 _CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 
 
@@ -77,22 +96,43 @@ def _sentences(message: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _test_names(sentence: str) -> list[str]:
+    """Nombres concretos de test/función citados en una frase de tests."""
+    found: list[str] = []
+    for regex in (_TEST_NAME, _FUNC_KEYWORD, _FUNC_CALL):
+        for m in regex.finditer(sentence):
+            name = m.group(1)
+            if name.lower() in _NAME_STOPWORDS:
+                continue
+            if name not in found:
+                found.append(name)
+    return found
+
+
 def extract_claims(message: str) -> list[Claim]:
     claims: list[Claim] = []
-    seen: set[tuple[str, str]] = set()
+    by_key: dict[tuple[str, str], Claim] = {}
 
-    def add(ctype: str, sentence: str, path: str = "") -> None:
+    def add(ctype: str, sentence: str, path: str = "", names: list[str] | None = None) -> None:
         key = (ctype, path.lower())
-        if key not in seen:
-            seen.add(key)
-            claims.append(Claim(ctype, sentence, path))
+        claim = by_key.get(key)
+        if claim is None:
+            claim = Claim(ctype, sentence, path, list(names or []))
+            by_key[key] = claim
+            claims.append(claim)
+        elif names:
+            # Misma afirmación en otra frase: acumula los nombres citados.
+            for n in names:
+                if n not in claim.names:
+                    claim.names.append(n)
 
     for sentence in _sentences(message):
         if _NEGATION.search(sentence):
             continue
         for ctype, pattern in _PATTERNS:
             if pattern.search(sentence):
-                add(ctype, sentence)
+                names = _test_names(sentence) if ctype == TEST_PASS else None
+                add(ctype, sentence, names=names)
         verb_type = None
         if _CREATE_VERBS.search(sentence):
             verb_type = FILE_CREATED

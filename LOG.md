@@ -1,5 +1,60 @@
 # LOG.md — ProofGate
 
+## 2026-07-10 — Fix: verificador de test_pass no vinculaba nombre concreto
+
+### Diagnóstico (causa raíz)
+
+- `claims.py`: un `Claim` de tipo `test_pass` solo guardaba el tipo genérico.
+  El nombre concreto citado en la afirmación (`test_multiplica`, `multiplica`)
+  se descartaba en la extracción.
+- `verifiers.py`: `verify_claims` para `test_pass` llamaba a
+  `_verify_command(_TEST_CMD)`, que devolvía `VERIFIED` en cuanto **el último**
+  comando de test del transcript tenía `is_error == False` — sin mirar **qué**
+  se testeó ni el contenido del output. Por eso "test_multiplica PASSED" se
+  marcaba VERIFIED con solo tener un `pytest` exitoso sobre suma/resta.
+
+### Fix aplicado
+
+1. `claims.py`: `Claim` gana el campo `names: list[str]`. Nueva función
+   `_test_names()` que, solo en frases `test_pass`, captura nombres concretos
+   con tres patrones: identificadores estilo pytest (`test_\w+`, `\w+_test`,
+   `TestX`), símbolo tras palabra clave ("función/function/método/method/
+   clase/class NAME") y llamada `NAME(` con paréntesis pegado. `_FUNC_CALL`
+   exige el paréntesis SIN espacio detrás del identificador para no capturar
+   prosa como "los tests pasan (12 passed)". Stopwords (`test`, `suite`, …)
+   excluidas. `add()` ahora acumula nombres si la misma afirmación aparece en
+   varias frases.
+2. `verifiers.py`: nuevo `_verify_test_pass()`. Sin nombres → comportamiento
+   previo (último test exitoso = VERIFIED). Con nombres → además exige que
+   CADA nombre aparezca en la salida de algún comando de test exitoso
+   (evidencia de que `pytest -v` listó ese test); si falta alguno → UNSUPPORTED.
+   El último run fallido sigue dando CONTRADICTED.
+3. Caso genérico intacto: sin nombre citado, no se endurece nada.
+4. Regresión en `tests/test_verifiers.py` + fixtures `named_mismatch.jsonl`
+   (suma/resta OK, afirmación sobre multiplica → UNSUPPORTED) y `named_ok.jsonl`
+   (test_multiplica en la salida → VERIFIED).
+
+### Decisiones de producto anotadas
+
+- **Verificamos vía salida del test, no con grep del código fuente.** Exigir
+  que exista la función en el código sería otro verificador (más ruidoso y con
+  falsa confianza sobre "existe ≠ testeada"). El requisito pide evidencia de
+  que ESE test corrió, y la salida de `pytest -v` es justo eso.
+- **Coincidencia por subcadena, no por límite de palabra**, para que
+  "función multiplica" (afirmación) case con `test_multiplica` (salida). Riesgo
+  asumido: un nombre que sea subcadena de otro (`add` en `test_address`) podría
+  falso-verificar; aceptable para el MVP.
+- **Consecuencia UX**: si el agente cita un test concreto pero corrió `pytest`
+  sin `-v` (salida sin nombres), la afirmación queda UNSUPPORTED. Es el
+  comportamiento correcto según el requisito; mitigación: correr `pytest -v`.
+
+### Suite completa tras el fix
+
+`test_claims: OK` · `test_verifiers: OK` (incluida la regresión) ·
+`test_blocking: OK` (6/6). Nada roto. El caso honesto de `test_blocking`
+("los tests pasan (12 passed)") confirma empíricamente que "(12 passed)" no
+se captura como nombre espurio.
+
 ## 2026-07-10 — Sesión inicial: FASE 0 → FASE 3 completas
 
 ### Completado

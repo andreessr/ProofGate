@@ -60,6 +60,39 @@ def _verify_command(tr: Transcript, pattern: re.Pattern, what: str) -> tuple[str
     return CONTRADICTED, f"el último `{cmd}` FALLÓ: {last.result_text[:200]}"
 
 
+def _verify_test_pass(claim: Claim, tr: Transcript) -> Verification:
+    """Verifica una afirmación de tests en verde.
+
+    Genérica ("los tests pasan"): basta con que el último comando de test se
+    ejecutara con éxito. Con nombre(s) concreto(s) ("test_multiplica PASSED"):
+    además exige que ese nombre aparezca en la salida de algún comando de test
+    exitoso — que `pytest -v` liste ese test es la evidencia de que corrió.
+    """
+    runs = [c for c in _bash_matching(tr, _TEST_CMD) if c.is_error is not None]
+    if not runs:
+        return Verification(claim, UNSUPPORTED, "ningún comando de test ejecutado en la sesión")
+    last = runs[-1]
+    cmd = str(last.input.get("command", ""))[:100]
+    if not last.succeeded:
+        return Verification(claim, CONTRADICTED, f"el último `{cmd}` FALLÓ: {last.result_text[:200]}")
+
+    names = claim.names
+    if not names:
+        return Verification(claim, VERIFIED, f"`{cmd}` ejecutado con éxito (exit 0)")
+
+    # La afirmación cita nombres concretos: exige evidencia específica de cada uno
+    # en la salida de algún test que se ejecutó con éxito.
+    success_output = "\n".join(c.result_text for c in runs if c.succeeded).lower()
+    missing = [n for n in names if n.lower() not in success_output]
+    if missing:
+        return Verification(claim, UNSUPPORTED,
+                            f"hubo un test exitoso (`{cmd}`) pero su salida no menciona "
+                            f"{', '.join(missing)}: no hay evidencia de que ese test/función "
+                            f"concretos se ejecutaran")
+    return Verification(claim, VERIFIED,
+                        f"`{cmd}` con éxito y su salida menciona {', '.join(names)}")
+
+
 def _verify_file(claim: Claim, tr: Transcript, cwd: str) -> Verification:
     path = claim.path
     abspath = path if os.path.isabs(path) else os.path.join(cwd, path)
@@ -91,8 +124,7 @@ def verify_claims(claims: list[Claim], tr: Transcript, cwd: str) -> list[Verific
     results = []
     for claim in claims:
         if claim.type == TEST_PASS:
-            verdict, ev = _verify_command(tr, _TEST_CMD, "test")
-            results.append(Verification(claim, verdict, ev))
+            results.append(_verify_test_pass(claim, tr))
         elif claim.type == COMMIT:
             verdict, ev = _verify_command(tr, _GIT_COMMIT, "git commit")
             if verdict == VERIFIED:
