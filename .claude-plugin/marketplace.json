@@ -1,0 +1,15 @@
+{
+  "name": "proofgate-marketplace",
+  "description": "Marketplace for ProofGate: active trust layer for Claude Code sessions.",
+  "owner": {
+    "name": "Andres Rodriguez",
+    "email": "rodriguezcanellasandres@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "proofgate",
+      "source": "./",
+      "description": "Stop hook that blocks false session closings: verifies test runs, git commits/pushes and file claims against real transcript evidence, then writes TRUST_REPORT.md."
+    }
+  ]
+}
