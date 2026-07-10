@@ -88,12 +88,35 @@ _NAME_STOPWORDS = {"test", "tests", "suite", "suites"}
 
 _CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 
+# Separadores de cláusula DENTRO de una frase. Se usan solo para acotar la
+# comprobación de negación (no para partir la frase de cara al matching
+# positivo), porque los patrones de _PATTERNS pueden abarcar varias cláusulas.
+_CLAUSE_SEP = re.compile(r"[:;,]")
+
 
 def _sentences(message: str) -> list[str]:
     text = _CODE_FENCE.sub(" ", message)
     # Cortar por líneas y por fin de frase; suficiente para heurísticas.
     parts = re.split(r"[\n\r]+|(?<=[.!?])\s+", text)
     return [p.strip() for p in parts if p.strip()]
+
+
+def _negated_near(sentence: str, start: int, end: int) -> bool:
+    """¿Hay una negación en la MISMA cláusula que la afirmación detectada?
+
+    Acota la búsqueda de negación a la cláusula que contiene el match: desde el
+    separador (: ; ,) anterior al match hasta el posterior. Así una negación en
+    otra cláusula ("los tests pasan: ... no debería haber roto nada") no
+    descarta una afirmación verdadera, mientras el patrón positivo sigue viendo
+    la frase completa. Si el match abarca varias cláusulas, la negación dentro
+    de ese tramo sí cuenta.
+    """
+    left = 0
+    for m in _CLAUSE_SEP.finditer(sentence, 0, start):
+        left = m.end()
+    right_m = _CLAUSE_SEP.search(sentence, end)
+    right = right_m.start() if right_m else len(sentence)
+    return bool(_NEGATION.search(sentence[left:right]))
 
 
 def _test_names(sentence: str) -> list[str]:
@@ -127,18 +150,22 @@ def extract_claims(message: str) -> list[Claim]:
                     claim.names.append(n)
 
     for sentence in _sentences(message):
-        if _NEGATION.search(sentence):
-            continue
+        # La negación se comprueba por cláusula (ventana alrededor de cada
+        # match), no sobre la frase entera: una negación en OTRA cláusula no
+        # debe silenciar una afirmación verdadera.
         for ctype, pattern in _PATTERNS:
-            if pattern.search(sentence):
-                names = _test_names(sentence) if ctype == TEST_PASS else None
-                add(ctype, sentence, names=names)
-        verb_type = None
-        if _CREATE_VERBS.search(sentence):
-            verb_type = FILE_CREATED
-        elif _MODIFY_VERBS.search(sentence):
+            for m in pattern.finditer(sentence):
+                if not _negated_near(sentence, m.start(), m.end()):
+                    names = _test_names(sentence) if ctype == TEST_PASS else None
+                    add(ctype, sentence, names=names)
+                    break  # una afirmación de este tipo por frase basta
+
+        verb_match = _CREATE_VERBS.search(sentence)
+        verb_type = FILE_CREATED
+        if not verb_match:
+            verb_match = _MODIFY_VERBS.search(sentence)
             verb_type = FILE_MODIFIED
-        if verb_type:
+        if verb_match and not _negated_near(sentence, verb_match.start(), verb_match.end()):
             for m in _PATH.finditer(sentence):
                 add(verb_type, sentence, m.group(1))
 

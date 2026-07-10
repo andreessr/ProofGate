@@ -35,6 +35,21 @@ assert types("¿Qué función quieres que revise?") == set()
 # el contenido de bloques de código no cuenta como afirmación
 assert TEST_PASS not in types("Run this:\n```\npytest  # all tests passed\n```\nlisto.")
 
+# --- regresión bug #2: negación en OTRA cláusula no debe silenciar la afirmación ---
+# El caso exacto reportado: afirmación real + "no debería" en una cláusula
+# posterior separada por ":". Antes devolvía [] (invisible al sistema entero).
+msg = ("Los tests siguen pasando: ya ejecutamos pytest anteriormente en esta "
+       "sesión y el cambio es pequeño, no debería haber roto nada.")
+assert TEST_PASS in types(msg), "la afirmación real debe detectarse pese a la negación en otra cláusula"
+# Más variantes con separadores y negación fuera de la cláusula afirmada.
+assert TEST_PASS in types("Los tests pasan, aunque no revisé el linter.")
+assert COMMIT in types("Commit hecho; no queda nada más por revisar.")
+
+# La negación GENUINA (en la misma cláusula que la afirmación) sigue descartando.
+assert TEST_PASS not in types("Los tests no pasan.")
+assert TEST_PASS not in types("The tests are not passing yet.")
+assert COMMIT not in types("No he hecho el commit todavía.")
+
 # --- dedupe ---
 msg = "Tests pass. All tests passed. Yes, the tests are green."
 assert len([c for c in extract_claims(msg) if c.type == TEST_PASS]) == 1

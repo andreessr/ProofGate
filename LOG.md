@@ -1,5 +1,66 @@
 # LOG.md — ProofGate
 
+## 2026-07-11 — Fix: negación en otra cláusula silenciaba la afirmación entera
+
+### Diagnóstico (causa raíz)
+
+`_sentences()` solo corta por saltos de línea y por puntuación de fin de frase
+(`.!?`), no por `:` ni `,`. El guard de negación estaba en `extract_claims`
+como `if _NEGATION.search(sentence): continue`, aplicado sobre esa "frase"
+gruesa completa. Resultado: si una frase con varias cláusulas separadas por
+`:`/`,` contenía una palabra de negación en CUALQUIER cláusula (aunque fuera
+distinta de la que lleva la afirmación real), toda la frase se descartaba. La
+afirmación verdadera nunca llegaba a `_PATTERNS`: ni se detectaba, ni se
+verificaba, ni salía en el TRUST_REPORT. Silencio total.
+
+Caso reportado: "Los tests siguen pasando: ya ejecutamos pytest anteriormente
+en esta sesión y el cambio es pequeño, no debería haber roto nada." → `no
+debería` disparaba `_NEGATION` sobre el texto entero → `extract_claims()`
+devolvía `[]`.
+
+### Fix aplicado (enfoque elegido y por qué)
+
+Elegido el **enfoque de ventana local** (opción 2), no el de partir por `:`/`,`
+(opción 1). Razón del trade-off: los patrones de `_PATTERNS` dependen de
+contexto multi-cláusula (`\btests?\b.{0,60}\b(pass...)` con `re.DOTALL`), de
+modo que "tests" y "pass" pueden estar separados por una coma dentro de la
+misma afirmación; partir la frase por comas rompería esas detecciones
+legítimas. La ventana local preserva el matching positivo sobre la frase
+completa y solo acota la comprobación de negación.
+
+- Nueva `_negated_near(sentence, start, end)`: busca negación únicamente en la
+  cláusula que contiene el match — desde el separador (`: ; ,`) anterior al
+  match hasta el posterior. Si el match abarca varias cláusulas, la negación
+  dentro de ese tramo sí cuenta.
+- El bucle de `extract_claims` ya no hace `continue` por frase. Itera los
+  matches de cada patrón (`finditer`) y añade la afirmación salvo que
+  `_negated_near` sea cierto. Para archivos, la negación se acota igual
+  alrededor del verbo (create/modify), preservando la selección previa.
+
+### Tests de regresión (en `tests/test_claims.py`)
+
+a. El caso exacto reportado + variantes con `,`/`;` y negación fuera de la
+   cláusula afirmada → SÍ se detecta la afirmación.
+b. Negación genuina en la misma cláusula ("Los tests no pasan.", "The tests
+   are not passing yet.", "No he hecho el commit todavía.") → sigue sin
+   generar claim. Confirma que no se rompió la detección de negaciones reales.
+
+### Suite completa tras el fix
+
+`test_claims: OK` · `test_verifiers: OK` · `test_blocking: OK` (6/6). Nada roto.
+
+### Confirmación del hueco temporal ya conocido (NO se arregla aquí)
+
+Como pedía el encargo, verifico que una vez arreglada la detección, el hueco
+test↔edición (pendiente de v2) sigue presente: con la frase corta y sin
+negaciones "Los tests pasan." sobre un transcript donde el `pytest -q` exitoso
+ocurrió ANTES de un `Edit` a `core.py`, el verificador genérico devuelve
+`VERIFIED` (`pytest -q ejecutado con éxito (exit 0)`) cuando en realidad el
+test podría fallar ahora. Es un problema distinto y posterior; queda como está,
+anotado abajo como pendiente de v2. Este fix solo garantiza que la afirmación
+se DETECTE; su veredicto correcto ante ediciones posteriores es harina de otro
+costal.
+
 ## 2026-07-10 — Fix: verificador de test_pass no vinculaba nombre concreto
 
 ### Diagnóstico (causa raíz)
