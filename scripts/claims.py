@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 
@@ -140,7 +141,7 @@ def _test_names(sentence: str) -> list[str]:
     return found
 
 
-def extract_claims(message: str, *, haiku_extractor=None) -> list[Claim]:
+def extract_claims(message: str, *, haiku_extractor=None, logger=None) -> list[Claim]:
     """Extrae afirmaciones del mensaje de cierre.
 
     Primario: Haiku (salvo PROOFGATE_NO_HAIKU=1). Fallback: regex, cuando Haiku
@@ -148,9 +149,13 @@ def extract_claims(message: str, *, haiku_extractor=None) -> list[Claim]:
     (incluso vacía) se respeta: significa que corrió y esas son las afirmaciones.
 
     `haiku_extractor` es un punto de inyección para tests (evita la red real).
+    `logger(msg)` recibe diagnósticos (p. ej. por qué no se ejecutó Haiku).
     """
     if os.environ.get("PROOFGATE_NO_HAIKU") != "1":
-        extractor = haiku_extractor if haiku_extractor is not None else _haiku_claims
+        if haiku_extractor is not None:
+            extractor = haiku_extractor
+        else:
+            extractor = lambda m: _haiku_claims(m, logger=logger)
         try:
             result = extractor(message)
         except Exception:
@@ -224,18 +229,69 @@ Message:
 """
 
 
-def _run_haiku(message: str) -> str | None:
-    """Ejecuta el CLI `claude` con Haiku. Devuelve stdout o None si falla."""
+# Rutas de instalación por usuario donde puede estar el binario `claude` cuando
+# NO está en el PATH del proceso (caso típico de un hook lanzado por Claude Code
+# con PATH mínimo). El native installer lo pone en ~/.local/bin; la instalación
+# local (migrate-installer) en ~/.claude/local; Homebrew en /opt/homebrew o
+# /usr/local. Se comprueban en orden tras fallar shutil.which.
+_CLAUDE_FALLBACK_PATHS = [
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "/usr/bin/claude",
+]
+
+
+def _is_executable(path: str) -> bool:
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _resolve_claude_bin() -> str | None:
+    """Resuelve la ruta absoluta del binario `claude` sin asumir que está en el
+    PATH del proceso. Orden: override explícito -> PATH -> rutas conocidas."""
+    override = os.environ.get("PROOFGATE_CLAUDE_BIN")
+    if override:
+        return override if _is_executable(override) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in _CLAUDE_FALLBACK_PATHS:
+        candidate = os.path.expanduser(candidate)
+        if _is_executable(candidate):
+            return candidate
+    return None
+
+
+def _run_haiku(message: str, logger=None) -> str | None:
+    """Ejecuta el CLI `claude` con Haiku. Devuelve stdout o None si falla.
+    `logger(msg)` recibe el motivo concreto del fallo (para el log de sesión)."""
+    binpath = _resolve_claude_bin()
+    if binpath is None:
+        if logger:
+            logger("Haiku no ejecutado: binario `claude` no encontrado (ni en PATH, "
+                   "ni en rutas conocidas, ni PROOFGATE_CLAUDE_BIN). Fallback a regex.")
+        return None
     timeout = float(os.environ.get("PROOFGATE_HAIKU_TIMEOUT", "18"))
     try:
         proc = subprocess.run(
-            ["claude", "-p", "--model", _HAIKU_MODEL, _HAIKU_PROMPT + message[:6000]],
+            [binpath, "-p", "--model", _HAIKU_MODEL, _HAIKU_PROMPT + message[:6000]],
             capture_output=True, text=True, timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except subprocess.TimeoutExpired:
+        if logger:
+            logger(f"Haiku no ejecutado: timeout tras {timeout}s. Fallback a regex.")
+        return None
+    except (FileNotFoundError, OSError) as e:
+        if logger:
+            logger(f"Haiku no ejecutado: {type(e).__name__} al lanzar {binpath}. Fallback a regex.")
         return None
     out = (proc.stdout or "").strip()
-    return out or None
+    if not out:
+        if logger:
+            logger("Haiku devolvió salida vacía. Fallback a regex.")
+        return None
+    return out
 
 
 def _parse_haiku_json(raw: str) -> list[Claim] | None:
@@ -262,9 +318,12 @@ def _parse_haiku_json(raw: str) -> list[Claim] | None:
     return claims
 
 
-def _haiku_claims(message: str) -> list[Claim] | None:
+def _haiku_claims(message: str, logger=None) -> list[Claim] | None:
     """Extractor primario. None = falló (→ fallback a regex)."""
-    raw = _run_haiku(message)
+    raw = _run_haiku(message, logger=logger)
     if raw is None:
         return None
-    return _parse_haiku_json(raw)
+    parsed = _parse_haiku_json(raw)
+    if parsed is None and logger:
+        logger("Haiku devolvió salida no parseable como JSON. Fallback a regex.")
+    return parsed

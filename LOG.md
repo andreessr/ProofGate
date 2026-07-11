@@ -1,5 +1,71 @@
 # LOG.md — ProofGate
 
+## 2026-07-11 — Fix crítico: Haiku nunca se ejecutaba (binario fuera del PATH del hook)
+
+### Diagnóstico (causa raíz)
+
+`_run_haiku` invocaba `subprocess.run(["claude", ...])`. `subprocess` con lista
+de argumentos NO usa shell y busca el binario únicamente en el `PATH` del
+proceso actual. En una terminal interactiva el hook heredaría el PATH completo
+del shell y funciona; pero un hook lanzado por Claude Code corre con un PATH
+mínimo. En esta máquina `claude` vive en `~/.local/bin/claude` (instalación por
+usuario, symlink a `~/.local/share/claude/versions/2.1.207`), que no está en
+`/usr/bin:/bin`. Reproducción confirmada:
+
+    env -i HOME="$HOME" PATH="/usr/bin:/bin" python3 -c "...claims._run_haiku(...)"
+    -> None   (FileNotFoundError capturado -> fallback a regex)
+
+Consecuencia: en producción real el extractor PRIMARIO (Haiku) nunca corría;
+el hook caía SIEMPRE al fallback de regex, que es justo el que no cubre "creé".
+El bug #3 parecía arreglado pero seguía roto fuera de la suite.
+
+### Por qué la suite no lo cazó
+
+Los tests de `test_haiku.py` inyectan un `haiku_extractor` fake o testean
+`_parse_haiku_json` con strings; **nunca ejercitan la resolución real del
+binario ni `subprocess.run`**. El mock entra antes de que se toque el PATH, así
+que la ruta que fallaba en producción no estaba cubierta por ningún test. Además
+`_run_haiku` devolvía `None` idéntico tanto para "binario no encontrado" como
+para "Haiku corrió y no vio nada", haciendo el fallo invisible e indistinguible
+desde el log — de ahí lo costoso del diagnóstico.
+
+### Fix
+
+1. `_resolve_claude_bin()`: resuelve la ruta en este orden — (a)
+   `PROOFGATE_CLAUDE_BIN` explícito, (b) `shutil.which("claude")` con el PATH
+   real, (c) lista de rutas de instalación por usuario conocidas
+   (`~/.local/bin/claude`, `~/.claude/local/claude`, `/opt/homebrew/bin`,
+   `/usr/local/bin`, `/usr/bin`), comprobando fichero + permiso de ejecución.
+2. `_run_haiku` usa esa ruta absoluta en vez de `"claude"`.
+3. Si no se encuentra, se registra en el LOG DE SESIÓN normal (vía `log()`,
+   no en errors.log) el motivo exacto ("binario no encontrado"), distinguible
+   de "Haiku corrió y no detectó nada", "timeout", "salida vacía" y "salida no
+   parseable". `extract_claims` acepta un `logger` que `proofgate_stop` conecta
+   a `log(session_id, ...)`.
+4. Si aun así no hay binario → fallback a regex (comportamiento correcto, sin
+   cambios), pero ahora con rastro en el log.
+
+### Resultado suite
+
+`test_haiku: OK` (ahora 11 casos; los 4 nuevos ejercitan resolución real del
+binario + subprocess con un `claude` falso, override por env, y el log
+explícito del motivo) · `test_claims: OK` · `test_verifiers: OK` ·
+`test_blocking: OK`.
+
+### Verificación en vivo (la que faltaba: ejercitar la ruta real del binario)
+
+Con PATH restringido a `/usr/bin:/bin` (sin `~/.local/bin`) pero entorno de auth
+intacto — fiel a cómo un hook hereda el entorno — `_resolve_claude_bin()`
+devuelve `/Users/andre/.local/bin/claude` y `_run_haiku(...)` sobre "Cree
+hello.py ... test_saludo pasa" devolvió `file_created`/`hello.py` y `test_pass`
+con `names=["test_saludo"]`. Antes del fix, ese mismo PATH daba
+FileNotFoundError → None → regex. Bug resuelto en la ruta real.
+
+Nota: bajo `env -i` (entorno totalmente limpio) el binario ya se resuelve, pero
+Haiku responde "Not logged in" porque `env -i` borra el contexto de auth; eso
+es artefacto del test, no del entorno real del hook, y de todos modos cae
+limpiamente a regex (salida sin `[...]` → no parseable → fallback).
+
 ## 2026-07-11 — Cambio de diseño: Haiku como extractor primario, regex de fallback
 
 ### Diagnóstico de fondo

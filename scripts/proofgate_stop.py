@@ -83,7 +83,7 @@ def main() -> int:
     else:
         log(session_id, "Transcript no disponible; sin evidencia que cruzar")
 
-    claims = extract_claims(last_message)
+    claims = extract_claims(last_message, logger=lambda m: log(session_id, m))
     log(session_id, f"Afirmaciones extraídas: {[(c.type, c.path) for c in claims]}")
     if not claims or tr is None:
         return 0

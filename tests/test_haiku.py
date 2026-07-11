@@ -4,12 +4,13 @@ Nunca hace llamadas de red reales: inyecta un `haiku_extractor` fake o testea
 el parseo (`_parse_haiku_json`) directamente con strings JSON de ejemplo.
 """
 
-import sys, os
+import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 # Partimos de un entorno limpio (otro test pudo dejar NO_HAIKU puesto).
 os.environ.pop("PROOFGATE_NO_HAIKU", None)
 
+import claims as C
 from claims import (extract_claims, _parse_haiku_json, Claim,
                     TEST_PASS, COMMIT, FILE_CREATED)
 
@@ -89,5 +90,74 @@ res = extract_claims("He creado hello.py.",
                      haiku_extractor=lambda m: _parse_haiku_json("basura"))
 assert any(c.type == FILE_CREATED for c in res), res
 print("7. salida no parseable -> None -> fallback ✔")
+
+# --- Resolución del binario `claude` (bug #4: PATH restringido) ---
+_orig_fallback = C._CLAUDE_FALLBACK_PATHS
+_orig_path = os.environ.get("PATH", "")
+
+
+def _make_fake_claude(json_out):
+    """Crea un ejecutable falso `claude` que emite `json_out` por stdout."""
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "claude")
+    # Usa `echo` (builtin de sh) para no depender del PATH dentro del script,
+    # que en estos tests se deja vacío a propósito.
+    with open(p, "w") as f:
+        f.write("#!/bin/sh\necho '" + json_out + "'\n")
+    os.chmod(p, 0o755)
+    return p
+
+
+# 8. Con PATH sin `claude`, se encuentra en una ruta de fallback conocida y se
+#    ejecuta de verdad (esto SÍ ejercita _resolve_claude_bin + subprocess).
+fake = _make_fake_claude('[{"type":"file_created","text":"Cree hello.py","path":"hello.py","names":[]}]')
+os.environ.pop("PROOFGATE_CLAUDE_BIN", None)
+os.environ.pop("PROOFGATE_NO_HAIKU", None)
+os.environ["PATH"] = "/nonexistent-empty-path"   # shutil.which("claude") -> None
+C._CLAUDE_FALLBACK_PATHS = [fake]
+try:
+    assert C._resolve_claude_bin() == fake, C._resolve_claude_bin()
+    out = C._haiku_claims("Cree hello.py")   # resuelve + lanza el fake + parsea
+    assert out and out[0].type == FILE_CREATED and out[0].path == "hello.py", out
+finally:
+    C._CLAUDE_FALLBACK_PATHS = _orig_fallback
+    os.environ["PATH"] = _orig_path
+print("8. binario en ruta de fallback -> se resuelve y ejecuta con PATH restringido ✔")
+
+# 9. PROOFGATE_CLAUDE_BIN explícito tiene prioridad.
+os.environ["PROOFGATE_CLAUDE_BIN"] = fake
+try:
+    assert C._resolve_claude_bin() == fake
+finally:
+    os.environ.pop("PROOFGATE_CLAUDE_BIN", None)
+print("9. PROOFGATE_CLAUDE_BIN override respetado ✔")
+
+# 10. Binario NO encontrado en ningún sitio -> None + causa registrada en el log
+#     (distinguible de 'Haiku corrió y no vio nada').
+msgs = []
+os.environ["PATH"] = "/nonexistent-empty-path"
+os.environ.pop("PROOFGATE_CLAUDE_BIN", None)
+C._CLAUDE_FALLBACK_PATHS = []
+try:
+    assert C._resolve_claude_bin() is None
+    res = C._haiku_claims("Cree hello.py", logger=msgs.append)
+    assert res is None, res
+    assert any("no encontrado" in m.lower() for m in msgs), msgs
+finally:
+    C._CLAUDE_FALLBACK_PATHS = _orig_fallback
+    os.environ["PATH"] = _orig_path
+print("10. binario no encontrado -> None y causa explícita en el log ✔")
+
+# 11. El logger se propaga desde extract_claims cuando no hay binario.
+msgs = []
+os.environ["PATH"] = "/nonexistent-empty-path"
+C._CLAUDE_FALLBACK_PATHS = []
+try:
+    extract_claims("He creado hello.py.", logger=msgs.append)  # cae a regex
+    assert any("no encontrado" in m.lower() for m in msgs), msgs
+finally:
+    C._CLAUDE_FALLBACK_PATHS = _orig_fallback
+    os.environ["PATH"] = _orig_path
+print("11. extract_claims propaga el motivo al logger ✔")
 
 print("test_haiku: OK")
