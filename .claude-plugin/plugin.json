@@ -1,7 +1,7 @@
 {
   "name": "proofgate",
   "description": "Blocks the session from closing on unverified claims: cross-checks the agent's closing message against real transcript evidence (test exit codes, git shas, files on disk) and generates a TRUST_REPORT.md.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Andres Rodriguez"
   },
