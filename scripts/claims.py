@@ -1,9 +1,17 @@
 """Extracción de afirmaciones del mensaje de cierre del agente.
 
-Heurísticas por regex (español + inglés) sobre el last_assistant_message.
-Opcionalmente (PROOFGATE_USE_HAIKU=1) se pide a Haiku que extraiga
-afirmaciones adicionales; las heurísticas siempre corren primero y la
-llamada al modelo es best-effort con timeout corto.
+Extractor PRIMARIO: una llamada a Haiku que identifica las afirmaciones en
+lenguaje natural (cualquier idioma/tiempo verbal) y las devuelve en JSON.
+Generaliza mejor que una lista fija de patrones, que nunca cubre todas las
+conjugaciones y sinónimos de ES+EN.
+
+Extractor de FALLBACK: heurísticas por regex. Se usan solo si la llamada a
+Haiku falla, da timeout o no hay CLI disponible — la red de seguridad, no el
+método principal.
+
+Config:
+  PROOFGATE_NO_HAIKU=1        fuerza solo-regex (más rápido, sin red)
+  PROOFGATE_HAIKU_TIMEOUT=N   timeout en segundos de la llamada a Haiku (def. 18)
 """
 
 from __future__ import annotations
@@ -132,7 +140,27 @@ def _test_names(sentence: str) -> list[str]:
     return found
 
 
-def extract_claims(message: str) -> list[Claim]:
+def extract_claims(message: str, *, haiku_extractor=None) -> list[Claim]:
+    """Extrae afirmaciones del mensaje de cierre.
+
+    Primario: Haiku (salvo PROOFGATE_NO_HAIKU=1). Fallback: regex, cuando Haiku
+    devuelve None (fallo/timeout/sin CLI) o lanza. Si Haiku devuelve una lista
+    (incluso vacía) se respeta: significa que corrió y esas son las afirmaciones.
+
+    `haiku_extractor` es un punto de inyección para tests (evita la red real).
+    """
+    if os.environ.get("PROOFGATE_NO_HAIKU") != "1":
+        extractor = haiku_extractor if haiku_extractor is not None else _haiku_claims
+        try:
+            result = extractor(message)
+        except Exception:
+            result = None  # fail-open al fallback de regex
+        if result is not None:
+            return result
+    return _regex_claims(message)
+
+
+def _regex_claims(message: str) -> list[Claim]:
     claims: list[Claim] = []
     by_key: dict[tuple[str, str], Claim] = {}
 
@@ -169,41 +197,74 @@ def extract_claims(message: str) -> list[Claim]:
             for m in _PATH.finditer(sentence):
                 add(verb_type, sentence, m.group(1))
 
-    if os.environ.get("PROOFGATE_USE_HAIKU") == "1":
-        claims = _merge(claims, _haiku_claims(message))
     return claims
 
 
-def _merge(base: list[Claim], extra: list[Claim]) -> list[Claim]:
-    seen = {(c.type, c.path.lower()) for c in base}
-    for c in extra:
-        if (c.type, c.path.lower()) not in seen:
-            base.append(c)
-    return base
+# --- Extractor primario: Haiku ---
 
+_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+_VALID_TYPES = (TEST_PASS, COMMIT, PUSH, FILE_CREATED, FILE_MODIFIED)
 
-_HAIKU_PROMPT = """Extract factual completion claims from this AI assistant's closing message.
-Return ONLY a JSON array; each item: {"type": one of "test_pass","commit","push","file_created","file_modified", "text": the sentence, "path": file path or ""}.
-Only include things asserted as already done. Return [] if none.
+_HAIKU_PROMPT = """You extract factual COMPLETION claims from an AI coding assistant's final message to its user. A completion claim is something the assistant states it HAS ALREADY DONE — not something it plans to do, and not something it says it did NOT do.
+
+Return ONLY a JSON array. Each element is an object:
+{
+  "type": one of "test_pass", "commit", "push", "file_created", "file_modified",
+  "text": the exact sentence the claim comes from,
+  "path": for file_created/file_modified, the file path (e.g. "src/app.py"); "" otherwise,
+  "names": for test_pass, the specific test or function names the message says passed (e.g. ["test_multiplica","multiplica"]); [] for a generic "tests pass" claim or any other type
+}
+
+Rules:
+- Include ONLY things asserted as already completed. Ignore intentions ("I'll commit next", "voy a crear"), and ignore explicit non-completions ("I did not run the tests", "no he hecho commit").
+- Detect claims in ANY language (Spanish and English included) and ANY verb tense. For example "Creé hello.py", "He creado hello.py" and "I created hello.py" are all file_created with path "hello.py".
+- Return [] if there are no completion claims.
 
 Message:
 """
 
 
-def _haiku_claims(message: str) -> list[Claim]:
-    """Best-effort: usa el CLI `claude` con Haiku. Falla en silencio."""
+def _run_haiku(message: str) -> str | None:
+    """Ejecuta el CLI `claude` con Haiku. Devuelve stdout o None si falla."""
+    timeout = float(os.environ.get("PROOFGATE_HAIKU_TIMEOUT", "18"))
     try:
-        out = subprocess.run(
-            ["claude", "-p", "--model", "claude-haiku-4-5-20251001",
-             _HAIKU_PROMPT + message[:6000]],
-            capture_output=True, text=True, timeout=30,
-        ).stdout.strip()
-        start, end = out.find("["), out.rfind("]")
-        if start == -1 or end == -1:
-            return []
-        items = json.loads(out[start:end + 1])
-        return [Claim(i["type"], i.get("text", ""), i.get("path", "") or "")
-                for i in items
-                if i.get("type") in (TEST_PASS, COMMIT, PUSH, FILE_CREATED, FILE_MODIFIED)]
-    except Exception:
-        return []
+        proc = subprocess.run(
+            ["claude", "-p", "--model", _HAIKU_MODEL, _HAIKU_PROMPT + message[:6000]],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    out = (proc.stdout or "").strip()
+    return out or None
+
+
+def _parse_haiku_json(raw: str) -> list[Claim] | None:
+    """Parsea la respuesta de Haiku a lista de Claim. None si no es parseable
+    (se trata como fallo → fallback). Lista vacía es válido (no hay afirmaciones)."""
+    start, end = raw.find("["), raw.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        items = json.loads(raw[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(items, list):
+        return None
+    claims: list[Claim] = []
+    for it in items:
+        if not isinstance(it, dict) or it.get("type") not in _VALID_TYPES:
+            continue
+        raw_names = it.get("names")
+        names = [str(n) for n in raw_names if isinstance(n, str) and n] \
+            if isinstance(raw_names, list) else []
+        claims.append(Claim(it["type"], it.get("text", "") or "",
+                            it.get("path", "") or "", names))
+    return claims
+
+
+def _haiku_claims(message: str) -> list[Claim] | None:
+    """Extractor primario. None = falló (→ fallback a regex)."""
+    raw = _run_haiku(message)
+    if raw is None:
+        return None
+    return _parse_haiku_json(raw)

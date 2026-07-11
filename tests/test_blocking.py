@@ -10,6 +10,10 @@ import sys
 import tempfile
 import uuid
 
+# El hook se lanza como subproceso y hereda este entorno: forzamos solo-regex
+# para que la extracción sea determinista y sin red en la suite.
+os.environ["PROOFGATE_NO_HAIKU"] = "1"
+
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 HOOK = os.path.join(ROOT, "scripts", "proofgate_stop.py")
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")

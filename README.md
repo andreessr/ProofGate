@@ -77,7 +77,16 @@ python3 tests/test_blocking.py
 | `PROOFGATE_DISABLED=1` | Desactiva ProofGate por completo |
 | `PROOFGATE_MAX_BLOCKS=N` | Reintentos máximos por sesión (defecto 2) |
 | `PROOFGATE_REPORT=0` | No generar TRUST_REPORT.md |
-| `PROOFGATE_USE_HAIKU=1` | Extraer afirmaciones ambiguas con Haiku vía `claude -p` |
+| `PROOFGATE_NO_HAIKU=1` | Solo-regex: no llamar a Haiku (más rápido, sin red) |
+| `PROOFGATE_HAIKU_TIMEOUT=N` | Timeout en segundos de la llamada a Haiku (defecto 18) |
+
+Las afirmaciones se extraen con **Haiku** (vía `claude -p`) por defecto: un
+modelo generaliza mejor que una lista fija de regex para "¿qué afirma este
+mensaje?" en cualquier idioma o conjugación. Si la llamada falla, da timeout o
+no hay CLI, cae automáticamente a heurísticas de regex. `PROOFGATE_NO_HAIKU=1`
+fuerza el modo solo-regex. Los **verificadores** son siempre deterministas
+(sha, exit codes, contenido de archivo): Haiku solo influye en qué se extrae,
+no en cómo se comprueba.
 
 ## Qué verifica (v1)
 

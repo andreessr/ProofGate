@@ -1,6 +1,9 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
+# Estos tests validan el FALLBACK de regex de forma determinista (sin red).
+os.environ["PROOFGATE_NO_HAIKU"] = "1"
+
 from claims import extract_claims, TEST_PASS, COMMIT, PUSH, FILE_CREATED, FILE_MODIFIED
 
 

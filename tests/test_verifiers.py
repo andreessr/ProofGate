@@ -1,6 +1,8 @@
 import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
+os.environ["PROOFGATE_NO_HAIKU"] = "1"  # extracción determinista vía regex
+
 from transcript import load_transcript
 from claims import Claim, extract_claims, TEST_PASS, COMMIT, PUSH, FILE_CREATED
 from verifiers import verify_claims, VERIFIED, UNSUPPORTED, CONTRADICTED

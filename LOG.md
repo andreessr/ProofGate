@@ -1,5 +1,78 @@
 # LOG.md — ProofGate
 
+## 2026-07-11 — Cambio de diseño: Haiku como extractor primario, regex de fallback
+
+### Diagnóstico de fondo
+
+El síntoma reportado ("Creé hello.py..." → `extract_claims()` devuelve `[]`)
+es porque `_CREATE_VERBS` cubre `creado/creada/he creado` pero no el pretérito
+`creé`. Pero el problema no es esa conjugación concreta: es que mantener listas
+de regex exhaustivas para ES+EN, todas las conjugaciones y sinónimos, es una
+guerra perdida — cada prueba nueva encuentra otra forma que se cuela.
+"¿Qué afirma este mensaje en lenguaje natural?" es justo la tarea donde un
+modelo generaliza mejor que una lista fija.
+
+### Plan de cambio (invertir la prioridad)
+
+1. **Haiku pasa a ser el extractor PRINCIPAL, ON por defecto.** El prompt
+   (`_HAIKU_PROMPT`) se amplía para (a) detectar cualquier idioma/tiempo verbal
+   (incluye "Creé"/"He creado"/"I created" como file_created) y (b) devolver
+   también `names` para afirmaciones test_pass, que antes solo sacaba el regex.
+2. **Regex pasa a ser FALLBACK.** Se usa solo si Haiku falla/timeout/no hay CLI.
+   Para distinguir "Haiku corrió y no vio nada" (`[]`, se respeta) de "Haiku
+   falló" (`None`, se cae a regex), `_haiku_claims` devuelve `None` en fallo.
+3. **Verificadores sin cambios**: siguen deterministas (sha, exit codes,
+   contenido de archivo). Esto es solo sobre CÓMO se extrae, no cómo se verifica.
+4. **Timeout explícito** de Haiku: 18 s (`PROOFGATE_HAIKU_TIMEOUT`), dentro del
+   presupuesto de 60 s del hook, dejando margen para el fallback + verificación.
+5. **`PROOFGATE_NO_HAIKU=1`** fuerza solo-regex (más rápido, sin red).
+
+### Cómo lo hago testeable sin red real
+
+- `extract_claims(message, *, haiku_extractor=None)`: punto de inyección. Los
+  tests pasan un `haiku_extractor` fake que simula la respuesta de Haiku (lista
+  = éxito, `None` = fallo → fallback, `raise` → fallback). Cero llamadas de red.
+- La lógica de subproceso (`_run_haiku`) se separa del parseo
+  (`_parse_haiku_json`), que se testea directamente con un string JSON de
+  ejemplo (incluye el caso "Creé hello.py" y `names`).
+- Los tests de regresión YA EXISTENTES (nombre no vinculado, negación
+  multi-cláusula) fijan `PROOFGATE_NO_HAIKU=1` para validar de forma
+  determinista que el FALLBACK de regex sigue cubriéndolos. La cobertura de
+  esos casos por Haiku se garantiza a nivel de prompt (instrucciones
+  explícitas) y se puede comprobar en vivo manualmente, pero la suite no
+  depende de ello para no volverse lenta/frágil.
+- **Decisión**: NO se extiende el regex para cubrir "creé". El objetivo del
+  cambio es dejar de perseguir conjugaciones; Haiko lo cubre por prompt. El
+  modo solo-regex (NO_HAIKU) mantiene el hueco a sabiendas, es la elección
+  del usuario que prioriza velocidad/offline.
+
+### Resultado suite
+
+`test_haiku: OK` (7 casos: parseo con names, regresión "Creé hello.py" vía
+Haiku, fallback por None/excepción/JSON no parseable, respeto de `[]`,
+NO_HAIKU fuerza regex, y el fallback conserva los casos que el regex ya
+cubría) · `test_claims: OK` · `test_verifiers: OK` · `test_blocking: OK`.
+Los tres tests preexistentes fijan `PROOFGATE_NO_HAIKU=1` para validar el
+fallback de forma determinista y sin red.
+
+### Verificación en vivo (fuera de la suite)
+
+`_run_haiku("Creé hello.py ... Los tests test_saludo pasan.")` real: 6.6 s de
+latencia, devolvió `file_created`/`hello.py` y `test_pass` con
+`names=["test_saludo"]`. Confirma prompt + parseo + CLI de punta a punta y que
+el bug reportado queda resuelto en uso real.
+
+### Nota de latencia (trade-off de llamar a Haiku en cada Stop)
+
+Medido ~6-7 s por llamada; timeout 18 s; presupuesto del hook 60 s → margen
+amplio incluso con fallback. Mitigaciones ya presentes: timeout explícito,
+fallback a regex, `PROOFGATE_NO_HAIKU` para modo offline. Posibles mejoras v2
+si molesta: (a) no llamar a Haiku si el regex ya encontró afirmaciones y el
+mensaje es corto/inequívoco; (b) cachear por hash del mensaje para no repetir
+en reintentos de bloqueo del mismo turno; (c) short-circuit si el mensaje no
+contiene ninguna palabra "gatillo" (tests/commit/push/creado/…). No
+implementadas ahora para no añadir complejidad prematura.
+
 ## 2026-07-11 — Fix: negación en otra cláusula silenciaba la afirmación entera
 
 ### Diagnóstico (causa raíz)
