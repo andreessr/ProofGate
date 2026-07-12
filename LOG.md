@@ -1,5 +1,53 @@
 # LOG.md — ProofGate
 
+## 2026-07-12 — Fix de diseño: recursión del Stop hook vía la sub-llamada a Haiku
+
+### Diagnóstico
+
+Con ProofGate instalado en scope `user`, la propia sub-llamada del hook
+(`claude -p --model haiku …`) cargaba el plugin otra vez: su Stop disparaba
+otro ProofGate, que lanzaba otro `claude -p`, en cascada. No explotaba en
+bucle infinito solo porque cada nivel moría por el timeout de 18 s de su
+padre — corte **accidental**, no de diseño. Baseline medido: `claude -p "di
+hola"` = 20,4 s y **6** logs de sesión de ProofGate para devolver una palabra.
+Mecanismo, escenarios de riesgo y alternativas en RESEARCH_RECURSION.md.
+
+### Decisión (defensa en capas, corte determinista sin timeouts)
+
+- **Capa 1 (principal)**: `_run_haiku` exporta `PROOFGATE_INSIDE_HAIKU_CALL=1`
+  al subprocess; `proofgate_stop.py` hace early-exit (exit 0) si la ve, ANTES
+  de leer stdin. Deja rastro en `logs/recursion-guard.log` para observabilidad.
+- **Capa 2 (causa raíz + rendimiento)**: la sub-llamada añade
+  `--settings '{"disableAllHooks": true}'` → la sub-sesión no ejecuta ningún
+  hook. `--bare` se descartó (rompe auth OAuth); `--setting-sources ""` se
+  descartó por poco quirúrgico.
+- **No** se reutiliza `PROOFGATE_DISABLED=1`: conflaría desactivación manual
+  del usuario con guarda interna en logs y diagnóstico. Variable nueva =
+  intención explícita.
+
+### Pruebas (FASE 3)
+
+- `tests/test_recursion.py` (nuevo, 6 asserts): guarda activa → exit 0
+  inmediato sin log/estado/informe/bloqueo, incluso con stdin corrupto;
+  activación registrada; `_run_haiku` exporta guarda + disableAllHooks
+  (verificado con binario fake que vuelca env/args); sin guarda el hook sigue
+  bloqueando; auditoría de que claims.py es el único módulo con subprocesos.
+- Suite completa en verde (recursion, haiku, claims, verifiers, blocking).
+- **En vivo** (plugin 0.2.1 actualizado vía marketplace GitHub): llamada
+  directa a Haiku **8,1 s** (antes ~18 s+ con cascada) con extracción correcta
+  y 0 logs nuevos; sesión top-level completa 11,6 s y 1 solo log legítimo
+  (antes 20,4 s y 6 logs); sub-llamada simulada con la guarda 3,5 s, 0 logs,
+  +1 línea en recursion-guard.log. Tabla completa en RESEARCH_RECURSION.md.
+
+### Notas operativas
+
+- El marketplace instalado apunta a `github: andreessr/ProofGate` (publicado
+  por el usuario). El fix requirió push a main + `claude plugin marketplace
+  update` + `claude plugin update` (0.2.0 → 0.2.1). Ojo futuro: la copia
+  instalada NO se actualiza sola con cambios locales sin commit+push+update.
+- Los tests en vivo del día 11 chocaron con el límite de sesión del plan
+  (reset 15:10); las mediciones definitivas se hicieron el 12.
+
 ## 2026-07-11 — Fix crítico: Haiku nunca se ejecutaba (binario fuera del PATH del hook)
 
 ### Diagnóstico (causa raíz)

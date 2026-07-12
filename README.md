@@ -79,6 +79,8 @@ python3 tests/test_blocking.py
 | `PROOFGATE_REPORT=0` | No generar TRUST_REPORT.md |
 | `PROOFGATE_NO_HAIKU=1` | Solo-regex: no llamar a Haiku (más rápido, sin red) |
 | `PROOFGATE_HAIKU_TIMEOUT=N` | Timeout en segundos de la llamada a Haiku (defecto 18) |
+| `PROOFGATE_CLAUDE_BIN=/ruta` | Ruta explícita al binario `claude` si no se autodetecta |
+| `PROOFGATE_INSIDE_HAIKU_CALL` | **Interna, no la definas**: guarda anti-recursión de la sub-llamada a Haiku (ver RESEARCH_RECURSION.md) |
 
 Las afirmaciones se extraen con **Haiku** (vía `claude -p`) por defecto: un
 modelo generaliza mejor que una lista fija de regex para "¿qué afirma este

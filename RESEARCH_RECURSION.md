@@ -46,8 +46,9 @@ Fecha: 2026-07-11. Estado: mecanismo confirmado empíricamente en esta máquina.
 - **`--settings '{"disableAllHooks": true}'`**: ajuste documentado
   (`disableAllHooks`) inyectado por CLI; mantiene la auth normal. En la prueba
   A el tiempo bajó de 20,4 s → 3,0 s (los 2 logs que aparecieron eran
-  rezagados del baseline por timestamp/cwd). Verificación limpia pendiente de
-  límite de sesión del plan; se adopta como capa complementaria.
+  rezagados del baseline por timestamp/cwd). Verificado limpio tras el fix:
+  la sub-sesión con esta flag no ejecuta ningún hook (0 logs nuevos, guarda
+  sin activarse). Adoptado como capa 2.
 - **`--setting-sources ""`**: no carga settings de user/project/local, lo que
   debería evitar plugins de usuario por completo. Efecto colateral: también
   ignora el resto de configuración del usuario. Menos quirúrgico que
@@ -82,6 +83,14 @@ entorno por otra razón no distinguiría los casos. Variable nueva y específica
 3. El early-exit de la capa 1 deja una línea en
    `~/.claude/proofgate/logs/recursion-guard.log` (best-effort) para que la
    activación de la guarda sea observable, no silenciosa.
+
+## Mediciones antes vs. después del fix (en vivo, misma máquina)
+
+| Escenario | Antes | Después |
+|---|---|---|
+| `claude -p haiku "di hola"` (sesión top-level completa) | 20,4 s, **6** logs de sesión ProofGate, todos con timeout de 18 s | 11,6 s, **1** log (el legítimo de la propia sesión, extracción en ~5 s, sin timeouts) |
+| Llamada directa `_run_haiku(...)` (lo que hace el hook) | ~18 s+ (cascada) | **8,1 s**, extracción correcta, 0 logs nuevos |
+| Sub-llamada simulada (`PROOFGATE_INSIDE_HAIKU_CALL=1 claude -p …`) | n/a | 3,5 s, 0 logs de sesión, +1 línea en recursion-guard.log (early-exit determinista) |
 
 ## Auditoría de otros caminos de reentrada
 
