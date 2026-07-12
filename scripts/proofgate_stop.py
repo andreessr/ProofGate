@@ -60,6 +60,20 @@ def save_state(session_id: str, state: dict) -> None:
 
 
 def main() -> int:
+    # Guarda anti-recursión: si este Stop viene de la sub-sesión `claude -p`
+    # que el propio hook lanza para extraer afirmaciones con Haiku, salir YA:
+    # sin leer stdin, sin transcript, sin extracción. Corte determinista en el
+    # primer nivel (no depende de timeouts). Ver RESEARCH_RECURSION.md.
+    if os.environ.get("PROOFGATE_INSIDE_HAIKU_CALL") == "1":
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, "recursion-guard.log"), "a") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        "Stop dentro de la sub-llamada a Haiku ignorado (guarda anti-recursión)\n")
+        except OSError:
+            pass
+        return 0
+
     if os.environ.get("PROOFGATE_DISABLED") == "1":
         return 0
 

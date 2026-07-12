@@ -273,10 +273,18 @@ def _run_haiku(message: str, logger=None) -> str | None:
                    "ni en rutas conocidas, ni PROOFGATE_CLAUDE_BIN). Fallback a regex.")
         return None
     timeout = float(os.environ.get("PROOFGATE_HAIKU_TIMEOUT", "18"))
+    # Defensa anti-recursión en dos capas (ver RESEARCH_RECURSION.md):
+    # 1) PROOFGATE_INSIDE_HAIKU_CALL=1 en el entorno → si pese a todo un Stop
+    #    hook se dispara en la sub-sesión, proofgate_stop.py sale al instante.
+    # 2) disableAllHooks → la sub-sesión ni siquiera carga/ejecuta hooks.
+    env = dict(os.environ)
+    env["PROOFGATE_INSIDE_HAIKU_CALL"] = "1"
     try:
         proc = subprocess.run(
-            [binpath, "-p", "--model", _HAIKU_MODEL, _HAIKU_PROMPT + message[:6000]],
-            capture_output=True, text=True, timeout=timeout,
+            [binpath, "-p", "--model", _HAIKU_MODEL,
+             "--settings", '{"disableAllHooks": true}',
+             _HAIKU_PROMPT + message[:6000]],
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
         if logger:
